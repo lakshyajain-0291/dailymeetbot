@@ -139,7 +139,7 @@ cp .env.example .env
 
 ```mermaid
 graph LR
-    A[/startday command] --> B[Interactive Poll]
+    A["Run /startday"] --> B[Interactive Poll]
     B --> C[Select Unavailable Times]
     B --> D[Select Preferred Times]
     B --> E[Suggest Other Times]
@@ -148,6 +148,8 @@ graph LR
     E --> F
     F --> G[Votes Recorded]
 ```
+
+</div>
 
 </div>
 
