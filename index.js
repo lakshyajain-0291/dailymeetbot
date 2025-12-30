@@ -1,4 +1,9 @@
 require("dotenv").config();
+
+// Disable SSL verification for institutional networks with SSL inspection
+// WARNING: Only use in development, not in production
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+
 const {
   Client,
   GatewayIntentBits,
@@ -16,33 +21,84 @@ const {
 const fs = require("fs");
 const path = require("path");
 
-let config = require("./config.json");
-const configPath = path.join(__dirname, "config.json");
+// Per-guild configuration storage
+const guildConfigs = new Map();
+const configPath = path.join(__dirname, "guilds");
 
-// Save config to file
-function saveConfig() {
-  fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+// Ensure guilds directory exists
+if (!fs.existsSync(configPath)) {
+  fs.mkdirSync(configPath);
 }
 
-// Reload config from file
-function reloadConfig() {
-  delete require.cache[require.resolve("./config.json")];
-  config = require("./config.json");
+// Load guild config from file
+function loadGuildConfig(guildId) {
+  const filePath = path.join(configPath, `${guildId}.json`);
+  if (fs.existsSync(filePath)) {
+    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  }
+  
+  // Default config for new guilds
+  return {
+    timeslots: [
+      "11:00–11:30",
+      "15:00–15:30",
+      "17:00–17:30",
+      "18:00–18:30",
+      "20:00–20:30",
+      "23:00–23:30"
+    ],
+    adminRoleId: "",
+    autoSchedule: {
+      enabled: false,
+      channelId: "",
+      time: "09:00",
+      timezone: "Asia/Kolkata",
+      tagRole: ""
+    }
+  };
+}
+
+// Save guild config to file
+function saveGuildConfig(guildId, config) {
+  const filePath = path.join(configPath, `${guildId}.json`);
+  fs.writeFileSync(filePath, JSON.stringify(config, null, 2));
+  guildConfigs.set(guildId, config);
+}
+
+// Get guild config (from cache or load)
+function getGuildConfig(guildId) {
+  if (!guildConfigs.has(guildId)) {
+    const config = loadGuildConfig(guildId);
+    guildConfigs.set(guildId, config);
+  }
+  return guildConfigs.get(guildId);
 }
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds]
 });
 
-// In-memory daily state
-let dayState = {};
+// Per-guild daily state
+const guildStates = new Map();
 
-function resetDay() {
-  dayState = {};
+function getGuildState(guildId) {
+  if (!guildStates.has(guildId)) {
+    guildStates.set(guildId, {});
+  }
+  return guildStates.get(guildId);
+}
+
+function resetDay(guildId) {
+  const config = getGuildConfig(guildId);
+  const dayState = {};
+  
   config.timeslots.forEach(t => {
     dayState[t] = { unavailable: new Set(), preferred: new Set() };
   });
   dayState._otherSuggestions = new Map();
+  
+  guildStates.set(guildId, dayState);
+  return dayState;
 }
 
 // Parse time string (HH:MM) to minutes since midnight
@@ -92,21 +148,22 @@ function parseSuggestedTimes(text) {
   return allSlots;
 }
 
-resetDay();
-
 // Check if user is admin
-function isAdmin(interaction) {
+function isAdmin(interaction, config) {
   if (!config.adminRoleId) return interaction.member.permissions.has(PermissionFlagsBits.Administrator);
   return interaction.member.roles.cache.has(config.adminRoleId);
 }
 
-// Schedule daily poll
-let scheduledTask = null;
+// Per-guild scheduled tasks
+const scheduledTasks = new Map();
 
-function scheduleDailyPoll() {
-  if (scheduledTask) {
-    clearInterval(scheduledTask);
-    scheduledTask = null;
+function scheduleDailyPoll(guildId) {
+  const config = getGuildConfig(guildId);
+  
+  // Clear existing task for this guild
+  if (scheduledTasks.has(guildId)) {
+    clearInterval(scheduledTasks.get(guildId));
+    scheduledTasks.delete(guildId);
   }
 
   if (!config.autoSchedule.enabled || !config.autoSchedule.channelId) {
@@ -121,19 +178,21 @@ function scheduleDailyPoll() {
     if (now.getHours() === targetHour && now.getMinutes() === targetMin) {
       const channel = await client.channels.fetch(config.autoSchedule.channelId);
       if (channel) {
-        await postDailyPoll(channel, true);
+        await postDailyPoll(channel, guildId, true);
       }
     }
   };
 
   // Check every minute
-  scheduledTask = setInterval(checkAndPost, 60000);
-  console.log(`📅 Auto-schedule enabled: ${config.autoSchedule.time} in channel ${config.autoSchedule.channelId}`);
+  const taskId = setInterval(checkAndPost, 60000);
+  scheduledTasks.set(guildId, taskId);
+  console.log(`📅 Auto-schedule enabled for guild ${guildId}: ${config.autoSchedule.time} in channel ${config.autoSchedule.channelId}`);
 }
 
 // Post daily poll function
-async function postDailyPoll(channel, mentionRole = false) {
-  resetDay();
+async function postDailyPoll(channel, guildId, mentionRole = false) {
+  const config = getGuildConfig(guildId);
+  resetDay(guildId);
 
   const unavailableOptions = config.timeslots.map(slot =>
     new StringSelectMenuOptionBuilder()
@@ -147,43 +206,50 @@ async function postDailyPoll(channel, mentionRole = false) {
       .setValue(slot)
   );
 
-  const unavailableMenu = new StringSelectMenuBuilder()
-    .setCustomId("unavailable_select")
-    .setPlaceholder("❌ Select times you're UNAVAILABLE")
-    .addOptions(unavailableOptions)
+  const preferredMenu = new StringSelectMenuBuilder()
+    .setCustomId("preferred_select")
+    .setPlaceholder("✅ Select your BEST times (when you prefer to meet)")
+    .addOptions(preferredOptions)
     .setMinValues(0)
     .setMaxValues(config.timeslots.length);
 
-  const preferredMenu = new StringSelectMenuBuilder()
-    .setCustomId("preferred_select")
-    .setPlaceholder("⭐ Select times you PREFER")
-    .addOptions(preferredOptions)
+  const unavailableMenu = new StringSelectMenuBuilder()
+    .setCustomId("unavailable_select")
+    .setPlaceholder("❌ Select times when you're BUSY (cannot meet)")
+    .addOptions(unavailableOptions)
     .setMinValues(0)
     .setMaxValues(config.timeslots.length);
 
   const submitButton = new ButtonBuilder()
     .setCustomId("submit_availability")
-    .setLabel("📤 Submit")
-    .setStyle(ButtonStyle.Primary);
+    .setLabel("✅ Done")
+    .setStyle(ButtonStyle.Success);
 
   const otherTimesButton = new ButtonBuilder()
     .setCustomId("other_times")
-    .setLabel("➕ Suggest Other Times")
+    .setLabel("💡 Suggest Different Times")
     .setStyle(ButtonStyle.Secondary);
 
   const rows = [
-    new ActionRowBuilder().addComponents(unavailableMenu),
     new ActionRowBuilder().addComponents(preferredMenu),
+    new ActionRowBuilder().addComponents(unavailableMenu),
     new ActionRowBuilder().addComponents(submitButton, otherTimesButton)
   ];
 
-  let content = "🕒 **Mark your availability for today**\n\n" +
-               "• **Unavailable**: Times you absolutely cannot meet\n" +
-               "• **Preferred**: Times you'd like to meet\n" +
-               "• Leave both empty if you're available for all times";
+  let content = "📅 **When can you meet today?**\n\n" +
+               "**How to respond:**\n" +
+               "✅ Select your **preferred times** (when you'd like to meet)\n" +
+               "❌ Select times you're **busy** (cannot meet)\n" +
+               "💡 Or suggest **different times** if none work for you\n\n" +
+               "_Leave both empty if all times work equally for you_";
 
   if (mentionRole && config.autoSchedule.tagRole) {
-    content = `<@&${config.autoSchedule.tagRole}>\n\n` + content;
+    // Check if role ID matches guild ID (means @everyone was selected)
+    if (config.autoSchedule.tagRole === guildId) {
+      content = `@everyone\n\n` + content;
+    } else {
+      content = `<@&${config.autoSchedule.tagRole}>\n\n` + content;
+    }
   }
 
   await channel.send({
@@ -254,48 +320,84 @@ client.on("ready", async () => {
       .setDescription("Show all available commands and usage guide")
   ]);
 
-  // Start scheduled task if enabled
-  scheduleDailyPoll();
+  // Load all guild configs and start schedules on startup
+  console.log(`Logged in as ${client.user.tag}`);
+  console.log("Loading guild configurations...");
+  
+  // Initialize schedules for all existing guild configs
+  if (fs.existsSync(configPath)) {
+    const files = fs.readdirSync(configPath);
+    for (const file of files) {
+      if (file.endsWith('.json')) {
+        const guildId = file.replace('.json', '');
+        const config = getGuildConfig(guildId);
+        if (config.autoSchedule.enabled) {
+          scheduleDailyPoll(guildId);
+        }
+      }
+    }
+  }
+  
+  console.log(`Loaded ${guildConfigs.size} guild configurations`);
+});
+
+// Handle guild removal - cleanup
+client.on("guildDelete", (guild) => {
+  console.log(`Left guild: ${guild.name} (${guild.id})`);
+  
+  // Remove scheduled task
+  if (scheduledTasks.has(guild.id)) {
+    clearInterval(scheduledTasks.get(guild.id));
+    scheduledTasks.delete(guild.id);
+  }
+  
+  // Remove from memory
+  guildConfigs.delete(guild.id);
+  guildStates.delete(guild.id);
+  
+  // Delete config file
+  const filePath = path.join(configPath, `${guild.id}.json`);
+  if (fs.existsSync(filePath)) {
+    fs.unlinkSync(filePath);
+    console.log(`Deleted config for guild ${guild.id}`);
+  }
 });
 
 client.on("interactionCreate", async interaction => {
+  if (!interaction.guild) return; // Ignore DMs
+  
+  const guildId = interaction.guild.id;
+  const config = getGuildConfig(guildId);
+  
   if (interaction.isChatInputCommand()) {
+    console.log(`[Command] ${interaction.commandName} from ${interaction.user.tag} in guild ${guildId}`);
+    
     if (interaction.commandName === "startday") {
-      await postDailyPoll(interaction.channel);
+      await postDailyPoll(interaction.channel, guildId);
       await interaction.reply({ content: "✅ Poll posted!", ephemeral: true });
+      console.log(`[startday] Success`);
     }
 
     if (interaction.commandName === "addslot") {
-      console.log("[addslot] Command received");
-      
-      if (!isAdmin(interaction)) {
-        console.log("[addslot] Not admin, rejecting");
+      if (!isAdmin(interaction, config)) {
         await interaction.reply({ content: "❌ Admin only", ephemeral: true });
         return;
       }
 
-      console.log("[addslot] Admin check passed, deferring reply");
       await interaction.deferReply({ ephemeral: true });
-      console.log("[addslot] Reply deferred");
 
       try {
         const slot = interaction.options.getString("slot");
-        console.log("[addslot] Slot requested:", slot);
         
         if (config.timeslots.includes(slot)) {
-          console.log("[addslot] Slot already exists");
           await interaction.editReply({ content: `❌ Slot "${slot}" already exists` });
           return;
         }
 
-        console.log("[addslot] Adding slot to config");
         config.timeslots.push(slot);
-        console.log("[addslot] Saving config");
-        saveConfig();
-        console.log("[addslot] Config saved, sending success message");
+        saveGuildConfig(guildId, config);
 
         await interaction.editReply({ content: `✅ Added slot: ${slot}` });
-        console.log("[addslot] Success message sent");
       } catch (error) {
         console.error("[addslot] Error:", error);
         try {
@@ -307,7 +409,7 @@ client.on("interactionCreate", async interaction => {
     }
 
     if (interaction.commandName === "removeslot") {
-      if (!isAdmin(interaction)) {
+      if (!isAdmin(interaction, config)) {
         await interaction.reply({ content: "❌ Admin only", ephemeral: true });
         return;
       }
@@ -324,7 +426,7 @@ client.on("interactionCreate", async interaction => {
         }
 
         config.timeslots.splice(index, 1);
-        saveConfig();
+        saveGuildConfig(guildId, config);
 
         await interaction.editReply({ content: `✅ Removed slot: ${slot}` });
       } catch (error) {
@@ -345,7 +447,7 @@ client.on("interactionCreate", async interaction => {
       // Defer IMMEDIATELY to avoid timeout
       await interaction.deferReply({ ephemeral: true });
 
-      if (!isAdmin(interaction)) {
+      if (!isAdmin(interaction, config)) {
         await interaction.editReply({ content: "❌ Admin only" });
         return;
       }
@@ -365,56 +467,46 @@ client.on("interactionCreate", async interaction => {
         config.autoSchedule.time = time;
         config.autoSchedule.channelId = channel.id;
         config.autoSchedule.tagRole = role ? role.id : "";
-        saveConfig();
+        saveGuildConfig(guildId, config);
 
-        scheduleDailyPoll();
+        scheduleDailyPoll(guildId);
 
-        await interaction.editReply({ 
-          content: `✅ Auto-schedule enabled!\n` +
-                   `⏰ Time: ${time}\n` +
-                   `📢 Channel: ${channel}\n` +
-                   `${role ? `🏷️ Tag Role: ${role}` : "No role tagging"}` 
-        });
+        const response = `✅ Auto-schedule enabled!\n` +
+                        `⏰ Time: ${time}\n` +
+                        `📢 Channel: <#${channel.id}>\n` +
+                        `${role ? `🏷️ Tag Role: <@&${role.id}>` : "No role tagging"}`;
+        
+        await interaction.editReply({ content: response });
+        console.log(`[schedule] Successfully configured for guild ${guildId}`);
       } catch (error) {
-        console.error("Error in schedule:", error);
-        await interaction.editReply({ content: "❌ Error setting up schedule" });
+        console.error("[schedule] Error:", error);
+        try {
+          await interaction.editReply({ content: "❌ Error setting up schedule" });
+        } catch (e) {
+          console.error("[schedule] Failed to send error message:", e);
+        }
       }
     }
 
     if (interaction.commandName === "unschedule") {
-      console.log("[unschedule] Command received");
       // Defer IMMEDIATELY to avoid timeout
       await interaction.deferReply({ ephemeral: true });
-      console.log("[unschedule] Reply deferred");
 
-      if (!isAdmin(interaction)) {
-        console.log("[unschedule] Not admin");
+      if (!isAdmin(interaction, config)) {
         await interaction.editReply({ content: "❌ Admin only" });
         return;
       }
 
-      console.log("[unschedule] Admin check passed");
       try {
-        console.log("[unschedule] Disabling schedule");
         config.autoSchedule.enabled = false;
-        console.log("[unschedule] Saving config");
-        saveConfig();
-        console.log("[unschedule] Config saved");
+        saveGuildConfig(guildId, config);
 
-        console.log("[unschedule] Calling scheduleDailyPoll");
-        scheduleDailyPoll();
-        console.log("[unschedule] scheduleDailyPoll completed");
+        scheduleDailyPoll(guildId);
 
-        console.log("[unschedule] Sending success message");
         await interaction.editReply({ content: "✅ Auto-schedule disabled" });
-        console.log("[unschedule] Success message sent");
       } catch (error) {
-        console.error("[unschedule] Error:", error);
-        try {
-          await interaction.editReply({ content: "❌ Error disabling schedule" });
-        } catch (e) {
-          console.error("[unschedule] Failed to send error message:", e);
-        }
+        console.error("Error in unschedule:", error);
+        await interaction.editReply({ content: "❌ Error disabling schedule" });
       }
     }
 
@@ -422,7 +514,7 @@ client.on("interactionCreate", async interaction => {
       // Defer IMMEDIATELY to avoid timeout
       await interaction.deferReply({ ephemeral: true });
 
-      if (!isAdmin(interaction)) {
+      if (!isAdmin(interaction, config)) {
         await interaction.editReply({ content: "❌ Admin only" });
         return;
       }
@@ -450,8 +542,8 @@ client.on("interactionCreate", async interaction => {
 
         // Enable the schedule
         config.autoSchedule.enabled = true;
-        saveConfig();
-        scheduleDailyPoll();
+        saveGuildConfig(guildId, config);
+        scheduleDailyPoll(guildId);
 
         await interaction.editReply({ 
           content: `✅ Auto-schedule enabled!\n` +
@@ -464,6 +556,26 @@ client.on("interactionCreate", async interaction => {
         await interaction.editReply({ content: "❌ Error enabling schedule" });
       }
     }
+
+    if (interaction.commandName === "status") {
+      let msg = `📊 **Bot Status**\n\n`;
+      msg += `📋 **Time slots**: ${config.timeslots.length} configured\n`;
+      msg += `⏰ **Auto-schedule**: ${config.autoSchedule.enabled ? `Enabled (${config.autoSchedule.time})` : "Disabled"}\n`;
+      
+      if (config.autoSchedule.enabled) {
+        msg += `📢 **Channel**: <#${config.autoSchedule.channelId}>\n`;
+        if (config.autoSchedule.tagRole) {
+          msg += `🏷️ **Tag Role**: <@&${config.autoSchedule.tagRole}>\n`;
+        }
+      }
+
+      await interaction.reply({ content: msg, ephemeral: true });
+    }
+
+    if (interaction.commandName === "help") {
+      const guildId = interaction.guild.id;
+      const config = getGuildConfig(guildId);
+      const isAdminUser = isAdmin(interaction, config);
 
     if (interaction.commandName === "status") {
       let msg = `📊 **Bot Status**\n\n`;
@@ -541,6 +653,10 @@ client.on("interactionCreate", async interaction => {
       // Defer reply to avoid timeout
       await interaction.deferReply();
 
+      const guildId = interaction.guild.id;
+      const config = getGuildConfig(guildId);
+      const dayState = getGuildState(guildId);
+
       // Collect all unique time slots (config + suggested)
       const allSlots = new Set(config.timeslots);
       const slotVotes = new Map();
@@ -605,37 +721,45 @@ client.on("interactionCreate", async interaction => {
       // Sort by score descending
       breakdown.sort((a, b) => b.score - a.score);
 
-      let message = "📊 **Availability Analysis**\n\n";
-      breakdown.forEach(item => {
-        const emoji = item.slot === bestSlot ? "🏆" : "  ";
+      let message = "📊 **Meeting Time Analysis**\n\n";
+      
+      // Show top 5 times
+      const topSlots = breakdown.slice(0, Math.min(5, breakdown.length));
+      topSlots.forEach((item, index) => {
+        const emoji = index === 0 ? "🏆" : `${index + 1}️⃣`;
         const parts = [];
-        if (item.preferred > 0) parts.push(`${item.preferred} prefer`);
-        if (item.suggested > 0) parts.push(`${item.suggested} suggest`);
-        if (item.unavailable > 0) parts.push(`${item.unavailable} unavailable`);
+        if (item.preferred > 0) parts.push(`✅ ${item.preferred} prefer`);
+        if (item.suggested > 0) parts.push(`💡 ${item.suggested} suggest`);
+        if (item.unavailable > 0) parts.push(`❌ ${item.unavailable} busy`);
         
-        const details = parts.length > 0 ? parts.join(", ") : "no votes";
-        message += `${emoji} **${item.slot}**: ${details} (score: ${item.score})\n`;
+        const details = parts.length > 0 ? parts.join(" • ") : "No responses yet";
+        message += `${emoji} **${item.slot}**\n   ${details}\n   _Score: ${item.score}_\n\n`;
       });
 
+      if (breakdown.length > 5) {
+        message += `_...and ${breakdown.length - 5} more time slots_\n\n`;
+      }
+
       message += bestSlot
-        ? `\n✅ **Recommended meet time:** ${bestSlot}`
-        : "\n❌ No suitable time found";
+        ? `\n🎯 **Best time to meet:** ${bestSlot}\n\n_This time has the highest preference score!_`
+        : "\n⚠️ **No clear winner yet** - waiting for more responses";
 
       await interaction.editReply(message);
+      console.log(`[decide] Success`);
     }
-  }
+  } // End of isChatInputCommand block
 
   // Handle "Suggest Other Times" button
   if (interaction.isButton() && interaction.customId === "other_times") {
     const modal = new ModalBuilder()
       .setCustomId("other_times_modal")
-      .setTitle("Suggest Other Times");
+      .setTitle("Suggest Different Times");
 
     const timesInput = new TextInputBuilder()
       .setCustomId("other_times_input")
-      .setLabel("Your available times")
+      .setLabel("When can you meet? (one time range per line)")
       .setStyle(TextInputStyle.Paragraph)
-      .setPlaceholder("Example:\n09:00-09:30\n14:00-15:00\n21:30-22:00")
+      .setPlaceholder("Examples:\n09:00-09:30\n14:00-15:00 (auto-splits to 30min slots)\n21:30-22:00")
       .setRequired(false);
 
     modal.addComponents(new ActionRowBuilder().addComponents(timesInput));
@@ -645,6 +769,9 @@ client.on("interactionCreate", async interaction => {
 
   // Handle modal submission
   if (interaction.isModalSubmit() && interaction.customId === "other_times_modal") {
+    const guildId = interaction.guild.id;
+    const dayState = getGuildState(guildId);
+    
     const otherTimes = interaction.fields.getTextInputValue("other_times_input");
     const user = interaction.user.id;
 
@@ -665,8 +792,9 @@ client.on("interactionCreate", async interaction => {
     // Parse and show what slots were created
     const parsedSlots = parseSuggestedTimes(otherTimes);
     
+    const slotCount = parsedSlots.length;
     await interaction.reply({
-      content: `✅ Your suggested times have been recorded:\n\`\`\`\n${otherTimes}\n\`\`\`\n}`,
+      content: `✅ **Thanks!** Your suggested times have been recorded.\n\n📋 Created **${slotCount} time slot${slotCount !== 1 ? 's' : ''}**:\n${parsedSlots.map(s => `• ${s}`).join('\n')}\n\n💡 These will be included when analyzing the best meeting time.`,
       ephemeral: true
     });
   }
@@ -674,13 +802,16 @@ client.on("interactionCreate", async interaction => {
   // Handle submit button
   if (interaction.isButton() && interaction.customId === "submit_availability") {
     await interaction.reply({
-      content: "✅ Your availability has been submitted!",
+      content: "✅ **Thanks!** Your availability has been recorded.\n\n💡 You can update your choices anytime before the decision is made.",
       ephemeral: true
     });
   }
 
   // Handle select menu interactions
   if (interaction.isStringSelectMenu()) {
+    const guildId = interaction.guild.id;
+    const config = getGuildConfig(guildId);
+    const dayState = getGuildState(guildId);
     const user = interaction.user.id;
 
     if (interaction.customId === "unavailable_select") {
@@ -698,8 +829,12 @@ client.on("interactionCreate", async interaction => {
         dayState[slot].preferred.delete(user);
       });
 
+      const response = selectedSlots.length > 0 
+        ? `❌ Got it! You're busy during: ${selectedSlots.join(", ")}`
+        : `✅ Cleared your busy times - you're available for all slots!`;
+      
       await interaction.reply({
-        content: `❌ Marked unavailable: ${selectedSlots.join(", ") || "None"}`,
+        content: response,
         ephemeral: true
       });
     }
@@ -719,12 +854,16 @@ client.on("interactionCreate", async interaction => {
         }
       });
 
+      const response = selectedSlots.length > 0
+        ? `✅ Perfect! You prefer: ${selectedSlots.join(", ")}`
+        : `✅ Cleared your preferences - any time works for you!`;
+      
       await interaction.reply({
-        content: `⭐ Marked preferred: ${selectedSlots.join(", ") || "None"}`,
+        content: response,
         ephemeral: true
       });
     }
   }
-});
+}});
 
 client.login(process.env.DISCORD_TOKEN);

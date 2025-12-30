@@ -1,0 +1,16 @@
+{
+  "timeslots": [
+    "09:00–09:30",
+    "11:00–11:30",
+    "14:00–14:30",
+    "17:00–17:30",
+    "20:00–20:30"
+  ],
+  "adminRoleId": "",
+  "autoSchedule": {
+    "enabled": false,
+    "channelId": "",
+    "time": "09:00",
+    "tagRole": ""
+  }
+}

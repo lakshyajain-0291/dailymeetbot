@@ -16,30 +16,39 @@
 
 ## ✨ Features
 
+### 🌐 **Multi-Server Support**
+- Works seamlessly across unlimited Discord servers
+- Complete isolation between servers (independent configs, schedules, and votes)
+- Automatic per-server configuration management
+- Clean automatic cleanup when removed from a server
+
 ### 📊 **Interactive Availability Polling**
-- Multi-select dropdown menus for marking unavailable/preferred times
+- Intuitive multi-select menus with improved UX (preferred times first)
 - Custom time slot suggestions with automatic 30-minute chunking
 - Real-time vote tracking across all team members
+- Clear visual feedback and conversational responses
 
 ### 🧠 **Smart Decision Engine**
 - Advanced scoring algorithm: `-100` for unavailable, `+2` for preferred, `+1` for suggested
+- Top 5 ranking with emoji indicators (🏆 for best time)
 - Comprehensive analysis breakdown showing all time slots with vote counts
 - Automatic recommendation of the best meeting time
 
 ### ⏰ **Automated Scheduling**
 - Set up daily polls to post automatically at your chosen time
-- Configurable channel and role tagging
+- Configurable channel and @everyone or custom role tagging
 - Easy enable/disable without losing configuration
+- Persistent schedules across bot restarts
 
 ### 🔧 **Flexible Time Management**
 - Add/remove time slots on the fly
 - Support for custom time ranges (e.g., "09:00-11:00" splits into 30-min slots)
-- Persistent configuration across bot restarts
+- Persistent per-server configuration stored in `guilds/` directory
 
 ### 🛡️ **Admin Controls**
 - Role-based or permission-based admin access
 - Comprehensive help system with contextual documentation
-- Real-time status monitoring
+- Real-time status monitoring with `/status` command
 
 ---
 
@@ -168,39 +177,76 @@ graph LR
 
 **Sample Output:**
 ```
-📊 Availability Analysis
+📊 Meeting Time Analysis
 
-🏆 15:00–15:30: 4 prefer, 0 unavailable (score: 8)
-   11:00–11:30: 2 prefer (score: 4)
-   17:00–17:30: 1 prefer, 1 unavailable (score: -98)
-   09:00–09:30: 1 suggest (score: 1)
-   
-✅ Recommended meet time: 15:00–15:30
+🏆 15:00–15:30
+   ✅ 4 prefer • 💡 1 suggest
+   Score: 9
+
+1️⃣ 11:00–11:30
+   ✅ 2 prefer
+   Score: 4
+
+2️⃣ 17:00–17:30
+   ✅ 1 prefer • ❌ 1 busy
+   Score: -98
+
+3️⃣ 09:00–09:30
+   💡 1 suggest
+   Score: 1
+
+🎯 Best time to meet: 15:00–15:30
+
+This time has the highest preference score!
 ```
 
 ---
 
 ## ⚙️ Configuration
 
-### `config.json` Structure
+### Multi-Server Support
+
+DailyMeetBot supports **multiple Discord servers simultaneously** with complete isolation:
+
+- ✅ **Independent Configurations**: Each server has its own config file in `guilds/{guildId}.json`
+- ✅ **Separate Time Slots**: Different time slots, schedules, and admin settings per server
+- ✅ **Isolated Vote Tracking**: State management is completely independent between servers
+- ✅ **Automatic Cleanup**: Config files are automatically deleted when bot leaves a server
+- ✅ **Zero Interference**: Actions in one server never affect another server
+
+### Server Configuration Storage
+
+Each server's config is automatically stored as `guilds/{guildId}.json`:
 
 ```json
 {
   "timeslots": [
     "11:00–11:30",
     "15:00–15:30",
-    "17:00–17:30"
+    "17:00–17:30",
+    "18:00–18:30",
+    "20:00–20:30",
+    "23:00–23:30"
   ],
-  "adminRoleId": "123456789",
+  "adminRoleId": "",
   "autoSchedule": {
     "enabled": true,
-    "channelId": "987654321",
+    "channelId": "1454403088482832432",
     "time": "09:00",
     "timezone": "Asia/Kolkata",
-    "tagRole": "111222333"
+    "tagRole": "1454403087480651886"
   }
 }
 ```
+
+**Configuration Fields:**
+- `timeslots`: Array of available meeting times (HH:MM–HH:MM format)
+- `adminRoleId`: Optional role ID for admin permissions (empty = use Discord admin perms)
+- `autoSchedule.enabled`: Whether automatic daily polls are active
+- `autoSchedule.channelId`: Channel ID where polls are posted
+- `autoSchedule.time`: Time to post polls (HH:MM in 24-hour format)
+- `autoSchedule.timezone`: Timezone for scheduling (default: Asia/Kolkata)
+- `autoSchedule.tagRole`: Role ID to mention (if equals guildId, uses @everyone)
 
 ### Environment Variables
 
@@ -214,19 +260,29 @@ graph LR
 
 ```
 dailymeetbot/
-├── index.js              # Main bot logic
-├── config.json          # Time slots & schedule config
-├── .env                 # Environment variables
-├── package.json         # Dependencies
-└── README.md           # Documentation
+├── index.js              # Main bot logic with multi-server support
+├── guilds/               # Per-server configuration directory
+│   ├── {guildId1}.json  # Server 1 config
+│   ├── {guildId2}.json  # Server 2 config
+│   └── ...              # Additional server configs
+├── .env                 # Environment variables (DISCORD_TOKEN)
+├── .env.example         # Template for environment setup
+├── package.json         # Dependencies and scripts
+├── README.md           # Documentation
+├── ARCHITECTURE.md     # Detailed architecture docs
+├── TESTING.md          # Testing guide
+└── LICENSE             # ISC License
+
 ```
 
 ### Key Components
 
-- **Interactive Polls**: Discord.js Select Menus + Buttons
-- **State Management**: In-memory dayState with Set collections
-- **Scheduling**: Interval-based time checking (1-minute precision)
-- **Persistence**: JSON file-based configuration
+- **Multi-Server Architecture**: Map-based state management with per-guild isolation
+- **Interactive Polls**: Discord.js Select Menus + Buttons with improved UX
+- **State Management**: In-memory per-guild state with Set collections for vote tracking
+- **Scheduling**: Interval-based time checking (1-minute precision) per server
+- **Persistence**: JSON file-based configuration in `guilds/` directory
+- **Auto-cleanup**: Removes config when bot leaves a server
 
 ---
 
@@ -246,6 +302,17 @@ Contributions are welcome! Here's how you can help:
 - Test all changes thoroughly
 - Update README for new features
 - Add console logs for debugging
+- Test multi-server scenarios when making config changes
+- Verify per-guild isolation for state management features
+
+### Recent Improvements
+
+- ✅ Multi-server support with complete isolation
+- ✅ Improved UX: Reordered menus (preferred times first)
+- ✅ Fixed @everyone role tagging in auto-scheduled posts
+- ✅ Enhanced `/decide` output with top 5 ranking and emoji indicators
+- ✅ Better response messages with conversational tone
+- ✅ Persistent per-server configurations in `guilds/` directory
 
 ---
 
@@ -257,24 +324,58 @@ Contributions are welcome! Here's how you can help:
 - Verify bot token in `.env`
 - Check bot has proper permissions in Discord
 - Ensure bot is online in your server
-- Wait 1-2 minutes for slash commands to register
+- Wait 1-2 minutes for slash commands to register after inviting bot
+- Check console for error messages
 </details>
 
 <details>
-<summary><b>"Application did not respond" error</b></summary>
+<summary><b>"Application did not respond" or "thinking..." timeout</b></summary>
 
-- Check your internet connection
-- Restart the bot with `npm run dev`
-- Ensure config.json is not corrupted
+- This can occur due to network latency or SSL interception (e.g., institutional networks)
+- Commands still execute successfully - check bot logs
+- In development: Set `NODE_TLS_REJECT_UNAUTHORIZED='0'` in `.env` if behind SSL inspection
+- In production: Deploy to a server without SSL interception
+- Responses are deferred to prevent timeouts
 </details>
 
 <details>
 <summary><b>Schedule not working</b></summary>
 
-- Verify channel ID is correct in config.json
-- Check bot has permission to post in the channel
-- Ensure system time is accurate
 - Use `/status` to verify schedule is enabled
+- Check that the time format is HH:MM in 24-hour format
+- Verify bot has permission to post in the configured channel
+- Ensure system time is accurate
+- Check bot logs for scheduling confirmation messages
+</details>
+
+<details>
+<summary><b>@everyone not working in scheduled posts</b></summary>
+
+- Make sure you selected @everyone when setting up `/schedule`
+- Bot checks if tagRole matches guildId to use @everyone properly
+- Verify bot has "Mention @everyone, @here, and All Roles" permission
+</details>
+
+<details>
+<summary><b>Multi-server issues / config conflicts</b></summary>
+
+- Each server has completely isolated configuration
+- Check `guilds/` directory for individual server configs
+- Server config files are named `{guildId}.json`
+- Removing bot from server automatically deletes its config
+- Use `/status` in each server to verify individual configurations
+</details>
+
+<details>
+<summary><b>Development: SSL certificate errors</b></summary>
+
+- Common on institutional networks (universities, companies) with SSL inspection
+- Quick fix for development: Add to `.env`:
+  ```
+  NODE_TLS_REJECT_UNAUTHORIZED=0
+  ```
+- **WARNING**: Only use in development, never in production
+- Alternative: Use a VPN or different network
 </details>
 
 ---
